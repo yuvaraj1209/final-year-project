@@ -1,6 +1,6 @@
 # Render-Compatible MediaPipe Requirements - FIXED FOR LINUX
 opencv-python-headless==4.9.0.80
-mediapipe==0.10.9
+mediapipe==0.10.31
 aiohttp==3.9.3
 numpy==1.26.4
 websockets==12.0
