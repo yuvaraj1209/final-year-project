@@ -10,7 +10,8 @@ import CameraStream from './components/CameraStream';
 import { Accessibility, Camera, CameraOff } from 'lucide-react';
 
 // WebSocket URL - connect to cloud backend for real camera detection
-const WS_URL = import.meta.env.VITE_WS_URL || 'wss://gesture-control-dashboard.onrender.com';
+// WebSocket URL - connect to Render backend
+const WS_URL = "wss://gesture-control-backend-camera.onrender.com/ws";
 
 function App() {
   const { state, lastHeadDirection, notifications, sendMessage, connect, removeNotification, calibrateNose } = useWebSocket(WS_URL);
