@@ -1,102 +1,76 @@
 import asyncio
-import websockets
 import logging
 import os
-from aiohttp import web
-from aiohttp.web import Response
 import json
+from aiohttp import web, WSMsgType
 
 # Cloud deployment configuration
-WS_PORT = int(os.environ.get('PORT', 5000))
-WS_HOST = os.environ.get('WS_HOST', '0.0.0.0')
+PORT = int(os.environ.get("PORT", 10000))
+HOST = "0.0.0.0"
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("WSServer")
+
 
 class WSServer:
     def __init__(self):
         self.clients = set()
 
-    async def handle_client(self, websocket, path=None):
-        self.clients.add(websocket)
-        peer = getattr(websocket, "remote_address", None)
-        log.info(f"✅ Client connected: {peer}")
+    async def websocket_handler(self, request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+
+        self.clients.add(ws)
+        log.info("✅ Client connected")
 
         try:
-            async for message in websocket:
-                log.info(f"📩 Received: {message}")
+            async for msg in ws:
+                if msg.type == WSMsgType.TEXT:
+                    log.info(f"📩 Received: {msg.data}")
 
-                # Broadcast to everyone else
-                dead = []
-                for client in list(self.clients):
-                    if client is websocket:
-                        continue
-                    try:
-                        await client.send(message)
-                    except websockets.exceptions.ConnectionClosed:
-                        dead.append(client)
-                    except Exception as err:
-                        log.error(f"❌ Error sending to client: {err}")
-                        dead.append(client)
-                for d in dead:
-                    self.clients.discard(d)
+                    # Broadcast to all other clients
+                    for client in list(self.clients):
+                        if client != ws:
+                            await client.send_str(msg.data)
 
-        except websockets.exceptions.ConnectionClosed as e:
-            log.info(f"🔌 Client closed: code={e.code} reason={e.reason}")
-        except Exception as err:
-            log.error(f"❌ Handler error: {err}")
+                elif msg.type == WSMsgType.ERROR:
+                    log.error(f"❌ WebSocket error: {ws.exception()}")
+
         finally:
-            self.clients.discard(websocket)
+            self.clients.remove(ws)
             log.info("❌ Client disconnected")
 
-    # Health check endpoint for cloud platforms
+        return ws
+
     async def health_check(self, request):
-        return Response(
-            text=json.dumps({
-                "status": "healthy",
-                "clients": len(self.clients),
-                "service": "gesture-control-ws"
-            }),
-            content_type="application/json"
-        )
+        return web.json_response({
+            "status": "healthy",
+            "clients": len(self.clients),
+            "service": "gesture-control-backend-camera"
+        })
+
 
 async def main():
     server = WSServer()
-    
-    # Create HTTP server for health checks
+
     app = web.Application()
-    app.router.add_get('/health', server.health_check)
-    app.router.add_get('/', lambda r: Response(text="Gesture Control WebSocket Server"))
-    
-    # Start HTTP server
+
+    # Routes
+    app.router.add_get("/", lambda r: web.Response(text="Gesture Control Backend Running"))
+    app.router.add_get("/health", server.health_check)
+    app.router.add_get("/ws", server.websocket_handler)
+
+    log.info(f"🚀 Starting server on {HOST}:{PORT}")
+
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, WS_HOST, WS_PORT)
+    site = web.TCPSite(runner, HOST, PORT)
     await site.start()
-    
-    # Start WebSocket server on different port for development
-    # In production, use same port with path routing
-    ws_port = WS_PORT if os.environ.get('PORT') else 5001
-    
-    log.info(f"🚀 Starting WebSocket server on {WS_HOST}:{ws_port}")
-    log.info(f"🌐 Health check available at http://{WS_HOST}:{WS_PORT}/health")
-    
-    async with websockets.serve(
-        server.handle_client, 
-        WS_HOST, 
-        ws_port,
-        ping_interval=20,
-        ping_timeout=10,
-        compression=None
-    ):
-        log.info("✅ WebSocket server started successfully")
-        # Keep the server running
-        try:
-            await asyncio.Future()  # Run forever
-        except KeyboardInterrupt:
-            log.info("🛑 Server shutdown requested")
-        finally:
-            await runner.cleanup()
+
+    # Run forever
+    while True:
+        await asyncio.sleep(3600)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
