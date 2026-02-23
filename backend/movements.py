@@ -1,32 +1,38 @@
 import asyncio
-import json
 import logging
-import base64
 import cv2
 import numpy as np
-from aiohttp import web, WSMsgType
 import os
+import time
+import base64
+from aiohttp import web
+import json
+from aiohttp import WSMsgType
 
-# Try to import RPi.GPIO for motor control
-try:
-    import RPi.GPIO as GPIO
-    GPIO_AVAILABLE = True
-    log_msg = "✅ GPIO module loaded - Motor control enabled"
-except ImportError:
-    GPIO_AVAILABLE = False
-    GPIO = None
-    log_msg = "⚠️ GPIO module not available - Motor control disabled (running on non-RPi system)"
-
-# Cloud configuration
-PORT = int(os.environ.get('PORT', 10000))
-HOST = '0.0.0.0'
+# ================== CONFIG ==================
+PORT = int(os.environ.get("PORT", 10000))
+HOST = "0.0.0.0"
+CAMERA_DEVICE = "/dev/video0"
+FPS_LIMIT = 30
+# ============================================
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("GestureControl")
 
-# Log GPIO status
-log.info(log_msg)
-print(log_msg)
+latest_frame = None
+connected_clients = set()
+
+# ================= GPIO =====================
+try:
+    import RPi.GPIO as GPIO
+    GPIO_AVAILABLE = True
+    log.info("GPIO enabled")
+except:
+    GPIO_AVAILABLE = False
+    GPIO = None
+    log.info("GPIO not available (simulation mode)")
+
+# ================= MEDIAPIPE =================
 
 # Try to import MediaPipe for face detection with robust error handling
 try:
@@ -71,7 +77,7 @@ class MotorController:
         self.R_REN  = 19
         self.R_LEN  = 26
 
-        self.freq = 1000
+        self.freq = 800
 
         if self.use_gpio:
             GPIO.setmode(GPIO.BCM)
@@ -118,7 +124,7 @@ class MotorController:
         if not self.use_gpio:
             return
 
-        speed = int(max(0, min(60, intensity * 100)))
+        speed = int(max(0, min(20, intensity * 20)))
 
         if direction == "FORWARD":
             self.L_rpwm.ChangeDutyCycle(speed)
@@ -519,12 +525,13 @@ class HeadMovementDetector:
     def __init__(self):
         self.nose_center_x = None  # Dynamic nose center reference
         self.nose_center_y = None  # Dynamic nose center reference
-        self.movement_threshold = 0.025  # Sensitivity for nose movement
+        self.movement_threshold = 0.02  # Sensitivity for nose movement (lowered from 0.025)
         self.last_direction = 'STOP'
         self.last_movement_time = 0
-        self.movement_cooldown = 0.3  # 0.3 second cooldown between movements
+        self.movement_cooldown = 0.2  # Reduced from 0.3 for more responsive control
         self.calibration_frames = 0
         self.calibration_needed = True
+        self.last_logged_direction = None  # Track last logged direction for debug
         
     def detect_nose_movement(self, landmarks):
         """Detect nose movement direction from center reference point"""
@@ -561,44 +568,48 @@ class HeadMovementDetector:
                     return None  # Don't detect movement during calibration
                 else:
                     self.calibration_needed = False
-                    log.info(f"👃 Nose center calibrated: ({self.nose_center_x:.3f}, {self.nose_center_y:.3f})")
+                    log.info(f"✅ Head movement calibrated! Center: ({self.nose_center_x:.3f}, {self.nose_center_y:.3f})")
+                    log.info(f"   Controls: Move HEAD LEFT/RIGHT for wheelchair LEFT/RIGHT | Move HEAD UP/DOWN for FORWARD/BACKWARD")
             
             # Calculate nose displacement from center
             nose_diff_x = current_nose_x - self.nose_center_x
             nose_diff_y = current_nose_y - self.nose_center_y
             
+            # Calculate absolute movement distance
+            abs_dx = abs(nose_diff_x)
+            abs_dy = abs(nose_diff_y)
+            
             direction = None
             motor_speed = 0.0
             movement_intensity = 0.0
             
-            # Detect movement based on nose displacement
-            # Camera is mirrored - when user moves left, nose moves right in camera coordinates
-            # Left movement: user moves left, nose appears to move right (positive x) -> LEFT
-            if nose_diff_x > self.movement_threshold:
-                direction = 'LEFT'
-                motor_speed = min(0.8, abs(nose_diff_x) * 15)  # Scale factor for sensitivity
-                movement_intensity = min(0.9, abs(nose_diff_x) * 20)
-                
-            # Right movement: user moves right, nose appears to move left (negative x) -> RIGHT  
-            elif nose_diff_x < -self.movement_threshold:
-                direction = 'RIGHT'
-                motor_speed = min(0.8, abs(nose_diff_x) * 15)
-                movement_intensity = min(0.9, abs(nose_diff_x) * 20)
-                
-            # Forward movement: nose moves up (negative y displacement)
-            elif nose_diff_y < -self.movement_threshold:
-                direction = 'FORWARD' 
-                motor_speed = min(0.8, abs(nose_diff_y) * 15)
-                movement_intensity = min(0.9, abs(nose_diff_y) * 20)
-                
-            # Backward movement: nose moves down (positive y displacement)
-            elif nose_diff_y > self.movement_threshold:
-                direction = 'BACKWARD'
-                motor_speed = min(0.8, abs(nose_diff_y) * 15) 
-                movement_intensity = min(0.9, abs(nose_diff_y) * 20)
-                
-            # If no significant movement, return STOP
+            # Detect dominant direction based on larger displacement
+            # This allows diagonal movements to be interpreted correctly
+            
+            if abs_dx > self.movement_threshold or abs_dy > self.movement_threshold:
+                # Determine which direction is dominant
+                if abs_dx > abs_dy:
+                    # Horizontal movement is dominant
+                    # Camera view is mirrored: positive x = user head moved right (in real world)
+                    # So nose_diff_x > 0 means head moved right, output 'RIGHT'
+                    if nose_diff_x > 0:
+                        direction = 'RIGHT'
+                    else:
+                        direction = 'LEFT'
+                    movement_intensity = min(0.95, abs_dx * 2.5)
+                    motor_speed = min(0.85, abs_dx * 2.0)
+                else:
+                    # Vertical movement is dominant
+                    # Positive y = nose moved down = head tilted down = move BACKWARD
+                    # Negative y = nose moved up = head tilted up = move FORWARD
+                    if nose_diff_y > 0:
+                        direction = 'BACKWARD'
+                    else:
+                        direction = 'FORWARD'
+                    movement_intensity = min(0.95, abs_dy * 2.5)
+                    motor_speed = min(0.85, abs_dy * 2.0)
             else:
+                # No significant movement
                 if self.last_direction != 'STOP':
                     direction = 'STOP'
                     motor_speed = 0.0
@@ -611,7 +622,7 @@ class HeadMovementDetector:
                 self.last_direction = direction
                 self.last_movement_time = current_time
                 
-                log.info(f" Nose movement: {direction} (Camera coords - dx: {nose_diff_x:.3f}, dy: {nose_diff_y:.3f})")
+                log.info(f"🎯 Head movement: {direction} | Displacement: dx={nose_diff_x:+.4f}, dy={nose_diff_y:+.4f} | Intensity: {movement_intensity:.2f}")
                 
                 return {
                     'direction': direction,
@@ -621,7 +632,8 @@ class HeadMovementDetector:
                     'total_distance': 25.5,     # Static for demo
                     'session_time': int(current_time % 3600),
                     'nose_center': {'x': self.nose_center_x, 'y': self.nose_center_y},
-                    'current_nose': {'x': current_nose_x, 'y': current_nose_y}
+                    'current_nose': {'x': current_nose_x, 'y': current_nose_y},
+                    'displacement': {'dx': nose_diff_x, 'dy': nose_diff_y}
                 }
                     
         except Exception as e:
@@ -803,44 +815,109 @@ async def status_broadcaster():
                     dead_clients.add(ws)
             connected_clients -= dead_clients
 
-# Create the web application
+
+# ============================================================
+# ====================== VIDEO STREAM ========================
+# ============================================================
+
+async def video_feed(request):
+    async def stream(resp):
+        global latest_frame
+        while True:
+            if latest_frame is not None:
+                _, jpeg = cv2.imencode(".jpg", latest_frame)
+                await resp.write(
+                    b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" +
+                    jpeg.tobytes() + b"\r\n"
+                )
+            await asyncio.sleep(0.03)
+
+    response = web.StreamResponse(
+        status=200,
+        headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"}
+    )
+    await response.prepare(request)
+    await stream(response)
+    return response
+
+# ============================================================
+# ====================== CAMERA LOOP =========================
+# ============================================================
+
+async def camera_loop():
+    global latest_frame
+
+    if not MEDIAPIPE_AVAILABLE:
+        return
+
+    face_mesh = mp_face_mesh.FaceMesh(
+        static_image_mode=False,
+        max_num_faces=1,
+        refine_landmarks=True
+    )
+
+    cap = cv2.VideoCapture(CAMERA_DEVICE)
+    if not cap.isOpened():
+        log.error("Cannot open camera")
+        return
+
+    log.info("Camera started")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        latest_frame = frame.copy()
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb)
+
+        if results.multi_face_landmarks:
+            landmarks = results.multi_face_landmarks
+
+            blink_data = blink_detector.detect_blink(landmarks)
+            if blink_data:
+                blink_type = blink_data["type"]
+                events = system_state.handle_blink(blink_type)
+                for event in events:
+                    await broadcast_message(event)
+
+        if system_state.current_mode == "WHEELCHAIR":
+            nose_movement = nose_movement_detector.detect_nose_movement(landmarks)
+            if nose_movement:
+                direction = nose_movement.get("direction", "STOP")
+                intensity = nose_movement.get("movement_intensity", 0.0)
+
+                await broadcast_message({
+                "event": "NOSE_MOVE",
+                "payload": nose_movement
+                })
+
+                if motor_controller:
+                    motor_controller.send_command(direction, intensity)
+
+        await asyncio.sleep(1 / FPS_LIMIT)
+
+
+# ============================================================
+# ========================= APP ==============================
+# ============================================================
+
 app = web.Application()
-app.router.add_get('/', health_check)
-app.router.add_get('/health', health_check)
-app.router.add_get('/ws', websocket_handler)
+app.router.add_get("/ws", websocket_handler)
+app.router.add_get("/video_feed", video_feed)
 
 async def main():
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, HOST, PORT)
     await site.start()
-    
-    log.info(f" Gesture Control Server started on http://{HOST}:{PORT}")
-    log.info(f" WebSocket endpoint: ws://{HOST}:{PORT}/ws")
-    log.info(f"  Health check: http://{HOST}:{PORT}/health")
-    log.info(f" Camera processing: {' Enabled' if MEDIAPIPE_AVAILABLE else ' Disabled'}")
-    
-    # Start background status broadcaster
-    asyncio.create_task(status_broadcaster())
-    
-    # Keep server running
-    try:
-        await asyncio.Event().wait()
-    except KeyboardInterrupt:
-        log.info(" Server shutdown")
-    finally:
-        # Clean up motor controller on exit
-        if motor_controller:
-            try:
-                motor_controller.stop()
-                log.info("✅ Motor controller cleaned up")
-            except Exception as e:
-                log.error(f"Error cleaning up motor controller: {e}")
-        
-        await runner.cleanup()
+
+    asyncio.create_task(camera_loop())
+
+    log.info(f"Server running on {HOST}:{PORT}")
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        log.info(" Goodbye!")
+    asyncio.run(main())

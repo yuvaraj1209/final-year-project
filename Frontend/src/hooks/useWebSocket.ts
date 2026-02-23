@@ -78,10 +78,12 @@ export const useWebSocket = (url: string) => {
 
       ws.current.onmessage = (event) => {
         try {
-          console.log('📩 Received:', event.data);
           const message: WebSocketMessage = JSON.parse(event.data);
+          const eventType = message.event || (message as any).type;
           
-          switch (message.event) {
+          console.log('📩 Received:', eventType, message);
+          
+          switch (eventType) {
             case 'INIT':
               setState(prev => ({
                 ...prev,
@@ -225,8 +227,26 @@ export const useWebSocket = (url: string) => {
               console.log('Command:', message.payload?.text);
               break;
 
+            case 'camera_frame':
+              // Dispatch camera frame to CameraStream component
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('websocket-message', {
+                  detail: message
+                }));
+              }
+              break;
+
+            case 'face_detection_result':
+              // Dispatch face detection result to CameraStream component
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('websocket-message', {
+                  detail: message
+                }));
+              }
+              break;
+
             default:
-              console.log('Unknown event:', message.event);
+              console.log('Unknown event:', eventType);
           }
         } catch (error) {
           console.error('Failed to parse WebSocket message:', error);

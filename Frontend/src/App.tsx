@@ -168,6 +168,7 @@ function App() {
                   onFaceDetection={handleFaceDetection}
                   sendMessage={sendMessage}
                   connected={state.connected}
+                  controlActive={state.mode !== 'STOP'}
                 />
                 
                 {/* Face Detection Info */}
