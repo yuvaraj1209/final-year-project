@@ -2,9 +2,10 @@ import asyncio
 import logging
 import os
 import json
+import cv2
 from aiohttp import web, WSMsgType
 
-# Cloud deployment configuration
+# Cloud / Local configuration
 PORT = int(os.environ.get("PORT", 10000))
 HOST = "0.0.0.0"
 
@@ -15,7 +16,16 @@ log = logging.getLogger("WSServer")
 class WSServer:
     def __init__(self):
         self.clients = set()
+        self.cap = cv2.VideoCapture(0)  # USB Camera
 
+        if not self.cap.isOpened():
+            log.error("❌ Could not open USB camera")
+        else:
+            log.info("📷 USB Camera initialized")
+
+    # =========================
+    # WebSocket Handler
+    # =========================
     async def websocket_handler(self, request):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
@@ -42,6 +52,9 @@ class WSServer:
 
         return ws
 
+    # =========================
+    # Health Check
+    # =========================
     async def health_check(self, request):
         return web.json_response({
             "status": "healthy",
@@ -49,7 +62,39 @@ class WSServer:
             "service": "gesture-control-backend-camera"
         })
 
+    # =========================
+    # Video Stream (MJPEG)
+    # =========================
+    async def video_feed(self, request):
+        async def stream():
+            while True:
+                ret, frame = self.cap.read()
+                if not ret:
+                    continue
 
+                _, jpeg = cv2.imencode('.jpg', frame)
+                frame_bytes = jpeg.tobytes()
+
+                yield (
+                    b'--frame\r\n'
+                    b'Content-Type: image/jpeg\r\n\r\n' +
+                    frame_bytes +
+                    b'\r\n'
+                )
+
+                await asyncio.sleep(0.03)  # ~30 FPS
+
+        return web.Response(
+            body=stream(),
+            headers={
+                'Content-Type': 'multipart/x-mixed-replace; boundary=frame'
+            }
+        )
+
+
+# =========================
+# Main App
+# =========================
 async def main():
     server = WSServer()
 
@@ -59,6 +104,7 @@ async def main():
     app.router.add_get("/", lambda r: web.Response(text="Gesture Control Backend Running"))
     app.router.add_get("/health", server.health_check)
     app.router.add_get("/ws", server.websocket_handler)
+    app.router.add_get("/video_feed", server.video_feed)
 
     log.info(f"🚀 Starting server on {HOST}:{PORT}")
 
