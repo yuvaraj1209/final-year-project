@@ -17,6 +17,10 @@ class WSServer:
     def __init__(self):
         self.clients = set()
         self.cap = cv2.VideoCapture(0)  # USB Camera
+        # Reduce resolution for faster streaming
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
 
         if not self.cap.isOpened():
             log.error("❌ Could not open USB camera")
@@ -72,7 +76,8 @@ class WSServer:
                 if not ret:
                     continue
 
-                _, jpeg = cv2.imencode('.jpg', frame)
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 60]
+                _, jpeg = cv2.imencode('.jpg', frame, encode_param)
                 frame_bytes = jpeg.tobytes()
 
                 yield (
@@ -82,7 +87,7 @@ class WSServer:
                     b'\r\n'
                 )
 
-                await asyncio.sleep(0.03)  # ~30 FPS
+                await asyncio.sleep(0.01)  # ~30 FPS
 
         return web.Response(
             body=stream(),

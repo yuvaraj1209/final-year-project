@@ -525,13 +525,12 @@ class HeadMovementDetector:
     def __init__(self):
         self.nose_center_x = None  # Dynamic nose center reference
         self.nose_center_y = None  # Dynamic nose center reference
-        self.movement_threshold = 0.02  # Sensitivity for nose movement (lowered from 0.025)
+        self.movement_threshold = 0.025  # Sensitivity for nose movement
         self.last_direction = 'STOP'
         self.last_movement_time = 0
-        self.movement_cooldown = 0.2  # Reduced from 0.3 for more responsive control
+        self.movement_cooldown = 0.3  # 0.3 second cooldown between movements
         self.calibration_frames = 0
         self.calibration_needed = True
-        self.last_logged_direction = None  # Track last logged direction for debug
         
     def detect_nose_movement(self, landmarks):
         """Detect nose movement direction from center reference point"""
@@ -568,8 +567,7 @@ class HeadMovementDetector:
                     return None  # Don't detect movement during calibration
                 else:
                     self.calibration_needed = False
-                    log.info(f"✅ Head movement calibrated! Center: ({self.nose_center_x:.3f}, {self.nose_center_y:.3f})")
-                    log.info(f"   Controls: Move HEAD LEFT/RIGHT for wheelchair LEFT/RIGHT | Move HEAD UP/DOWN for FORWARD/BACKWARD")
+                    log.info(f"👃 Nose center calibrated: ({self.nose_center_x:.3f}, {self.nose_center_y:.3f})")
             
             # Calculate nose displacement from center
             nose_diff_x = current_nose_x - self.nose_center_x
@@ -622,7 +620,7 @@ class HeadMovementDetector:
                 self.last_direction = direction
                 self.last_movement_time = current_time
                 
-                log.info(f"🎯 Head movement: {direction} | Displacement: dx={nose_diff_x:+.4f}, dy={nose_diff_y:+.4f} | Intensity: {movement_intensity:.2f}")
+                log.info(f" Nose movement: {direction} (Camera coords - dx: {nose_diff_x:.3f}, dy: {nose_diff_y:.3f})")
                 
                 return {
                     'direction': direction,
@@ -632,8 +630,7 @@ class HeadMovementDetector:
                     'total_distance': 25.5,     # Static for demo
                     'session_time': int(current_time % 3600),
                     'nose_center': {'x': self.nose_center_x, 'y': self.nose_center_y},
-                    'current_nose': {'x': current_nose_x, 'y': current_nose_y},
-                    'displacement': {'dx': nose_diff_x, 'dy': nose_diff_y}
+                    'current_nose': {'x': current_nose_x, 'y': current_nose_y}
                 }
                     
         except Exception as e:
@@ -920,4 +917,9 @@ async def main():
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log.info("Server stopped by user (Ctrl+C)")
+        if motor:
+            motor.stop()
